@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper (reference to be completed on publication)."
+title: "Matrix-function closures of non-polynomial terms in intrusive polynomial chaos: code and results"
+type: software
+authors:
+  - family-names: "Echeverría"
+    given-names: "Rubén"
+    affiliation: "Department of Aerospace Engineering, Institute I4, Universidad de León"
+  - family-names: "Delgado"
+    given-names: "Adrián"
+    affiliation: "Department of Aerospace Engineering, Institute I4, Universidad de León"
+  - family-names: "García-Gutiérrez"
+    given-names: "Adrián"
+    affiliation: "Department of Aerospace Engineering, Institute I4, Universidad de León"
+keywords:
+  - polynomial chaos
+  - stochastic Galerkin
+  - uncertainty quantification
+  - matrix functions
+  - Krylov methods
+  - physics-informed neural networks
+preferred-citation:
+  type: article
+  title: "Matrix-function closures of non-polynomial terms in intrusive polynomial chaos: formulation, Krylov evaluation and an assessment of physics-informed neural closures"
+  authors:
+    - family-names: "Echeverría"
+      given-names: "Rubén"
+    - family-names: "Delgado"
+      given-names: "Adrián"
+    - family-names: "García-Gutiérrez"
+      given-names: "Adrián"
+  status: preprint
