@@ -159,6 +159,21 @@ def fig_e3():
     fig.subplots_adjust(wspace=0.38)
     bottom_legend(fig, axs, ncol=3, y=-0.36)
     save(fig, "e3_pendulum_errors")
+    # the same without the X-TFC solver (version of the paper restricted to closures)
+    closures = [m for m in methods if not m.startswith("xtfc")]
+    fig, axs = plt.subplots(1, 3, figsize=(W2, 2.2))
+    _err_panels(axs[0], out, "l2_err", 0, closures, r"$\varepsilon_{L^2}(\theta)$")
+    _err_panels(axs[1], out, "std_err_p" if "std_err_p" in out["methods"]["eig"] else "std_err", 0, closures,
+                r"$\varepsilon_{\sigma}(\theta)$ (paired)")
+    _err_panels(axs[2], out, "bc", 0, closures, r"$BC(\theta)$", logy=False)
+    for ax in axs:
+        ax.set_xlabel("$t$")
+    for ax in axs[:2]:
+        ax.set_ylim(bottom=1e-5)
+        tidy_log(ax)
+    fig.subplots_adjust(wspace=0.38)
+    bottom_legend(fig, axs, ncol=3, y=-0.36)
+    save(fig, "e3_pendulum_errors_closures")
 
     # PDFs of theta at the three snapshot times
     Psi = out["Psi_sub"]
@@ -500,12 +515,97 @@ def fig_tradeoff():
     save(fig, "tradeoff")
 
 
+def fig_coherence():
+    """E13: time per closure call against the spacing of successive calls, implicit laws (one core)."""
+    role = {"warm": dict(color="#1baf7a", ls="-", marker="o"), "cold": dict(color="#e34948", ls=":", marker="v"),
+            "nkw": dict(color="#008300", ls=(0, (3, 1, 1, 1)), marker="d"),
+            "hyb": dict(color="#2a78d6", ls="-", marker="*"), "hyb2": dict(color="#4a3aa7", ls="--", marker="P"),
+            "fixed": dict(color="#2a78d6", ls=(0, (1, 1)), marker="x"), "psp": dict(color="#eda100", ls="--", marker="s")}
+    panels = [("heat", "heat conduction ($d=8$, 15 nodes)",
+               [("chord_w8", "warm", "chord, warm start"), ("nk_w8", "nkw", "NK, warm start"),
+                ("nk_c8", "cold", "NK, cold start"), ("pinn_nkc8", "hyb", "network guess + NK"),
+                ("pinn_chord8", "hyb2", "network guess + chord"), ("pinn_nk2", "fixed", "network + 2 NK (fixed)"),
+                ("psp_s4", "psp", "sparse PSP ($k=4$)")]),
+              ("osc", "oscillator ($d=6$)",
+               [("newton_w8", "warm", "Newton, warm start"), ("nk_w8", "nkw", "NK, warm start"),
+                ("newton_c8", "cold", "Newton, cold start"), ("pinn_newtonc8", "hyb", "network guess + Newton"),
+                ("pinn_chord8", "hyb2", "network guess + chord"),
+                ("pinn_newton1", "fixed", "network + 1 Newton (fixed)"), ("psp", "psp", "tensor PSP ($q=4$)")])]
+    fig, axs = plt.subplots(1, 2, figsize=(W2, 3.4))
+    for ax, (prob, title, meths) in zip(axs, panels):
+        out = load_pkl(f"e13_{prob}.pkl")
+        if out is None:
+            continue
+        sp = np.array(out["spacings"])
+        x = sp / (out["n_t"] - 1)
+        R = out["results"]
+        for m, k, lab in meths:
+            if (m, sp[0]) not in R:
+                continue
+            y = [np.median(R[(m, s)]["t_call"][~R[(m, s)]["first"]]) * 1e3 for s in sp]
+            ax.plot(x, y, lw=1.4, ms=4.5, label=lab, **role[k])
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel(r"spacing of successive calls, $\Delta t/T$")
+        ax.set_title(title)
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=2, handlelength=2.0, columnspacing=0.8,
+                  fontsize=6.6)
+    axs[0].set_ylabel("time per call [ms]")
+    fig.tight_layout(w_pad=2.5)
+    save(fig, "coherence")
+
+
+def fig_scaling():
+    """E12: cost per node and call of the closures alone against the number of nodes, on one CPU thread (solid, filled)
+    and on the GPU (dashed, hollow).  Whole trajectory on the stored meshes (N <= 60), last calls above."""
+    p = os.path.join(RES, "e12_scaling.json")
+    if not os.path.exists(p):
+        return
+    idx = {(r["problem"], r["method"], r["N"], r["device"], r["window"]): r for r in json.load(open(p))["records"]}
+    fam = {"chord_w8": ("#008300", "h", r"chord, warm, $10^{-8}$"), "pinn_nk2": ("#4a3aa7", "P", "PINN + 2 NK"),
+           "pinn": ("#2a78d6", "*", "PINN alone / PINN closure"), "lanczos": ("#1baf7a", "D", "Lanczos ($m=10$)"),
+           "taylor4": ("#e87ba4", "<", "Taylor-4"), "psp_s3": ("#eda100", "s", "sparse PSP, $k=p$"),
+           "psp_s4": ("#eda100", "^", "sparse PSP, $k=p+1$")}
+    panels = [("heat", "heat conduction ($d=8$, $P=165$)", ["chord_w8", "pinn_nk2", "pinn", "psp_s4"]),
+              ("ign", "ignition ($d=8$, $P=165$)", ["lanczos", "taylor4", "pinn", "psp_s3", "psp_s4"])]
+    fig, axs = plt.subplots(1, 2, figsize=(W2, 2.6), sharey=True)
+    for ax, (pr, title, meths) in zip(axs, panels):
+        for m in meths:
+            col, mk, lab = fam[m]
+            for dev, ls, filled in (("cpu1", "-", True), ("gpu", "--", False)):
+                pts = sorted((N, r["t_node_call_us"]) for (pr_, m_, N, d_, w), r in idx.items()
+                             if pr_ == pr and m_ == m and d_ == dev and w == ("first" if N <= 60 else "late"))
+                if not pts:
+                    continue
+                N, t = zip(*pts)
+                ax.plot(N, t, color=col, ls=ls, lw=1.3, marker=mk, ms=6 if mk == "*" else 4,
+                        mfc=col if filled else "white", mec=col if not filled else "white", mew=0.9 if not filled else 0.4,
+                        label=lab if dev == "cpu1" else None)
+        ax.axvline(125, color=INK2, lw=0.6, ls=":")          # whole trajectory to the left, last calls to the right
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("number of nodes")
+        ax.set_title(title)
+        tidy_log(ax)
+    axs[0].set_ylabel(r"time per node and call [$\mu$s]")
+    from matplotlib.lines import Line2D
+    H = [Line2D([], [], color=col, ls="-", lw=1.3, marker=mk, ms=6 if mk == "*" else 4, mec="white", mew=0.4, label=lab)
+         for col, mk, lab in (fam[m] for m in ("chord_w8", "pinn_nk2", "pinn", "lanczos", "taylor4", "psp_s3", "psp_s4"))]
+    D = [Line2D([], [], color=INK2, ls="-", marker="o", ms=4, mec="white", mew=0.4, label="one CPU thread"),
+         Line2D([], [], color=INK2, ls="--", marker="o", ms=4, mfc="white", mew=0.9, label="GPU (double precision)")]
+    fig.legend(handles=H, loc="lower center", ncol=4, bbox_to_anchor=(0.5, -0.135))
+    fig.legend(handles=D, loc="lower center", ncol=2, bbox_to_anchor=(0.5, -0.2))
+    fig.tight_layout(w_pad=1.5)
+    save(fig, "scaling")
+
+
 def load_pkl(name):
     p = os.path.join(RES, name)
     return pickle.load(open(p, "rb")) if os.path.exists(p) else None
 
 
 if __name__ == "__main__":
-    which = sys.argv[1:] or ["e1", "e3", "e4", "e5", "e7", "e8", "cost", "cost_implicit", "tradeoff"]
+    which = sys.argv[1:] or ["e1", "e3", "e4", "e5", "e7", "e8", "cost", "cost_implicit", "tradeoff", "coherence",
+                             "scaling"]
     for w in which:
         globals()[f"fig_{w}"]()

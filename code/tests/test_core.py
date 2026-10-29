@@ -356,6 +356,30 @@ def test_fourier_features_and_adaptive_sampling():
     assert abs(np.mean(idx >= 50) - 0.75) < 0.02
 
 
+def test_legendre_basis():
+    """Legendre family: orthonormality, exact Galerkin products, (P3) for a bounded input, ray ODE of exp."""
+    for d, p in [(1, 5), (2, 4)]:
+        B = PCBasis(d, p, "legendre")
+        X, W = B.quadrature(p + 2)
+        Psi = B.eval_basis(X)
+        assert np.abs(Psi.T @ (Psi * W[:, None]) - np.eye(B.P)).max() < 1e-12
+        Xs, Ws = B.quadrature(f"s{p}")
+        Ps = B.eval_basis(Xs)
+        assert np.abs(Ps.T @ (Ps * Ws[:, None]) - np.eye(B.P)).max() < 1e-10
+        u, v = RNG.normal(size=(2, B.P))
+        Xq, Wq = B.quadrature(2 * p + 2)
+        Pq = B.eval_basis(Xq)
+        assert np.allclose(B.sprod(u, v), ((Pq @ u) * (Pq @ v)) @ (Pq * Wq[:, None]), atol=1e-12)
+    B = PCBasis(1, 10, "legendre")
+    u = np.zeros(B.P)
+    u[0], u[1] = 1.0, 0.5                                     # 1 + 0.5 sqrt(3) x >= 1 - 0.5 sqrt(3) on [-1, 1]
+    assert np.linalg.eigvalsh(B.mult_matrix(u)).min() >= 1 - 0.5 * np.sqrt(3) - 1e-12
+    B = PCBasis(2, 4, "legendre")
+    nl = Exp(B)
+    x = rand_input(B)
+    G = sum(nl.taylor_terms(x[None], 30)[:32])[0]             # converged series = exp(M_x) e_0
+    assert np.allclose(G, ExactGalerkin(nl)(x), atol=1e-12)
+
 def test_node_parallel_matches_serial():
     """NodeParallel (persistent worker processes owning node blocks) returns the serial result to the solver tolerance
     (iterative solvers stop per block instead of per batch), keeping per-node state (warm starts, frozen Jacobians) and

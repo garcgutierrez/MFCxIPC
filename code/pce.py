@@ -3,7 +3,8 @@ Orthonormal Hermite polynomial chaos basis and Galerkin algebra.
 
 Conventions
 -----------
-* xi ~ N(0, I_d); psi_alpha(xi) = prod_i He_{alpha_i}(xi_i) / sqrt(alpha_i!)  (orthonormal).
+* xi ~ N(0, I_d); psi_alpha(xi) = prod_i He_{alpha_i}(xi_i) / sqrt(alpha_i!)  (orthonormal Hermite, the default), or
+  xi ~ U(-1, 1)^d; psi_alpha(xi) = prod_i sqrt(2 alpha_i + 1) P_{alpha_i}(xi_i)  (orthonormal Legendre, family="legendre").
 * Total-degree truncation |alpha| <= p, graded ordering, psi_0 = 1.
 * A random field u(xi) is stored as its coefficient vector u in R^P (last axis).
 * Galerkin product (u * v)_k = sum_ij C_ijk u_i v_j,  C_ijk = E[psi_i psi_j psi_k]
@@ -15,6 +16,7 @@ import math
 
 import numpy as np
 from numpy.polynomial.hermite_e import hermegauss
+from numpy.polynomial.legendre import leggauss
 
 
 DENSE_C_MAX = 250          # above this basis size the dense triple-product tensor is not formed
@@ -58,13 +60,44 @@ def hermite_eval_1d(x, pmax):
     return H / np.sqrt([math.factorial(n) for n in range(pmax + 1)])
 
 
+def legendre_eval_1d(x, pmax):
+    """Orthonormal sqrt(2n+1) P_n(x) for n = 0..pmax (uniform variable on [-1, 1]); returns (len(x), pmax+1)."""
+    x = np.asarray(x, dtype=float)
+    L = np.zeros(x.shape + (pmax + 1,))
+    L[..., 0] = 1.0
+    if pmax >= 1:
+        L[..., 1] = x
+    for n in range(1, pmax):
+        L[..., n + 1] = ((2 * n + 1) * x * L[..., n] - n * L[..., n - 1]) / (n + 1)
+    return L * np.sqrt(2 * np.arange(pmax + 1) + 1.0)
+
+
+def legendre_triple_1d(pmax):
+    """T[a,b,c] = E[psi_a psi_b psi_c] for orthonormal Legendre polynomials (Gauss-Legendre rule, exact)."""
+    x, w = leggauss(3 * pmax // 2 + 2)
+    L = legendre_eval_1d(x, pmax)
+    T = np.einsum('qa,qb,qc,q->abc', L, L, L, w / w.sum())
+    T[np.abs(T) < 1e-13] = 0.0
+    return T
+
+
+def gauss_rule(family, q):
+    """q-point Gauss rule of the family, weights normalised to sum 1."""
+    x, w = hermegauss(q) if family == "hermite" else leggauss(q)
+    return x, w / w.sum()
+
+
+TRIPLE = {"hermite": hermite_triple_1d, "legendre": legendre_triple_1d}
+EVAL = {"hermite": hermite_eval_1d, "legendre": legendre_eval_1d}
+
+
 class PCBasis:
-    def __init__(self, d, p):
-        self.d, self.p = d, p
+    def __init__(self, d, p, family="hermite"):
+        self.d, self.p, self.family = d, p, family
         self.alphas = multi_indices(d, p)
         self.P = len(self.alphas)
         self.degree = self.alphas.sum(axis=1)
-        T = hermite_triple_1d(p)
+        T = TRIPLE[family](p)
         A = self.alphas
         from scipy.sparse import csr_matrix
         if self.P <= DENSE_C_MAX:
@@ -139,7 +172,7 @@ class PCBasis:
     def eval_basis(self, xi):
         """xi: (N, d) -> Psi (N, P)."""
         xi = np.atleast_2d(xi)
-        H = hermite_eval_1d(xi, self.p)            # (N, d, p+1)
+        H = EVAL[self.family](xi, self.p)          # (N, d, p+1)
         Psi = np.ones((xi.shape[0], self.P))
         for i in range(self.d):
             Psi *= H[:, i, self.alphas[:, i]]
@@ -161,12 +194,11 @@ class PCBasis:
 
     # ---- quadrature / pseudo-spectral projection --------------------------
     def quadrature(self, q):
-        """Tensor Gauss-Hermite rule with q points per dimension (probabilists'), or, for q = "s<k>",
-        the Smolyak sparse rule of level k (exact for total degree 2k+1), see sparse_quadrature."""
+        """Tensor Gauss rule of the basis family with q points per dimension, or, for q = "s<k>", the Smolyak
+        sparse rule of level k (exact for total degree 2k+1), see sparse_quadrature."""
         if isinstance(q, str):
-            return sparse_quadrature(self.d, int(q.lstrip("s")))
-        x1, w1 = hermegauss(q)
-        w1 = w1 / w1.sum()
+            return sparse_quadrature(self.d, int(q.lstrip("s")), self.family)
+        x1, w1 = gauss_rule(self.family, q)
         X = np.array(list(itertools.product(x1, repeat=self.d)))
         W = np.prod(np.array(list(itertools.product(w1, repeat=self.d))), axis=1)
         return X, W
@@ -184,13 +216,12 @@ class PCBasis:
         return np.asarray(func(X)) @ (Psi * W[:, None])
 
 
-def sparse_quadrature(d, k):
-    """Smolyak sparse Gauss-Hermite rule A(d+k, d) built from the i-point Gauss rules (exact for degree
+def sparse_quadrature(d, k, family="hermite"):
+    """Smolyak sparse Gauss rule A(d+k, d) built from the i-point Gauss rules (exact for degree
     2i-1): sum over d <= |i| <= d+k, |i| >= k+1, of (-1)^(d+k-|i|) C(d-1, d+k-|i|) (x)_j Q_{i_j}.
     It is exact for polynomials of total degree 2k+1, so that the PC basis of degree p <= k is discretely
     orthonormal on it.  Coincident nodes are merged; some weights are negative."""
-    rules = {i: hermegauss(i) for i in range(1, k + 2)}
-    rules = {i: (x, w / w.sum()) for i, (x, w) in rules.items()}
+    rules = {i: gauss_rule(family, i) for i in range(1, k + 2)}
     acc = {}
     for extra in multi_indices(d, k):                 # i = 1 + extra, |extra| <= k
         s = int(np.sum(extra))
@@ -208,7 +239,7 @@ def sparse_quadrature(d, k):
 
 
 def lognormal_coeffs(basis, mean_log, sigma, dim):
-    """Exact PC coefficients of exp(mean_log + sigma*xi_dim)."""
+    """Exact PC coefficients of exp(mean_log + sigma*xi_dim) in a Hermite basis."""
     c = np.zeros(basis.P)
     A = basis.alphas
     pure = np.all(np.delete(A, dim, axis=1) == 0, axis=1)

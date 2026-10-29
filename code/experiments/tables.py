@@ -95,6 +95,10 @@ def pendulum():
     d = M["pinn_anchored"]
     lines.append(f"PINN closure (anchored, self-consistent) & --- & {e(d['l2_err'][40, 0])} & {e(d['l2_err'][80, 0])} & "
                  f"--- ({e(d['l2_err'][112, 0])} at $t=28$)" + r"\\")
+    # closures only (version without the X-TFC solver), with the anchored row shortened (notes a, b in the caption)
+    body("TabPendulumClosures", lines[:-1] + [
+        f"{'PINN closure (anchored)$^a$':38s} & --- & {e(d['l2_err'][40, 0])} & {e(d['l2_err'][80, 0])} & "
+        f"{e(d['l2_err'][112, 0])}$^b$" + r"\\"])
     d = M["xtfc"]
     lines.append(r"\midrule")
     lines.append(f"{'spectral X-TFC (GH nodes)':38s} & {wall(d['wall'])} & " + " & ".join(e(d['l2_err'][i, 0]) for i in idx) + r"\\")
@@ -715,21 +719,253 @@ def enhanced():
         NUM["ENHratioMin"], NUM["ENHratioMax"] = f"{min(ratios):.2f}", f"{max(ratios):.2f}"
 
 
+COH_ROWS = {
+    "heat": [("psp_s4", "sparse PSP ($k=4$)"), ("nk_c8", "NK, cold"), ("nk_w8", "NK, warm"), ("chord_c8", "chord, cold"),
+             ("chord_w8", "chord, warm"), ("pinn_nkc8", "network + NK"), ("pinn_chord8", "network + chord"),
+             ("pinn_nk2", "network + 2 NK (fixed)")],
+    "osc": [("psp", "tensor PSP ($q=4$)"), ("newton_c8", "Newton, cold"), ("newton_w8", "Newton, warm"),
+            ("chord_w8", "chord, warm"), ("nk_w8", "NK, warm"), ("pinn_newtonc8", "network + Newton"),
+            ("pinn_chord8", "network + chord"), ("pinn_newton1", "network + 1 Newton (fixed)")],
+}
+
+
+def coherence():
+    """E13: time per call against the spacing of successive calls (implicit laws)."""
+    lines = []
+    for prob, title in [("heat", "heat conduction ($d=8$, 15 nodes)"), ("osc", "oscillator ($d=6$, one input)")]:
+        out = load(f"e13_{prob}.pkl")
+        if out is None:
+            continue
+        sp = out["spacings"]
+        R = out["results"]
+        med = lambda m, s: float(np.median(R[(m, s)]["t_call"][~R[(m, s)]["first"]])) * 1e3
+        its = lambda m, s: float(np.nanmean(R[(m, s)]["iters"][~R[(m, s)]["first"]]))
+        lines.append(f"\\multicolumn{{{len(sp) + 2}}}{{l}}{{\\emph{{{title}}}}}\\\\")
+        for m, lab in COH_ROWS[prob]:
+            if (m, sp[0]) not in R:
+                continue
+            cells = []
+            for s in sp:
+                it = its(m, s)
+                t = med(m, s)
+                cells.append((f"{t:.0f}" if t >= 100 else f"{t:.1f}" if t >= 10 else f"{t:.2f}") + ("" if not np.isfinite(it) or m in ("pinn_nk2", "pinn_newton1")
+                                                  else f" ({it:.1f})"))
+            emax = max(np.nanmax(R[(m, s)]["e_max"]) for s in sp)     # nan: zero initial state (t = 0)
+            lines.append(f"{lab} & " + " & ".join(cells) + f" & {e(emax)}\\\\")
+        tag = "Heat" if prob == "heat" else "Osc"
+        # the fastest warm classical solver and the network-guess solver, closest and widest spacing
+        best_w = "chord_w8" if prob == "heat" else "newton_w8"
+        hyb = "pinn_chord8" if prob == "heat" else "pinn_newtonc8"
+        NUM[f"COH{tag}WarmNear"] = f"{med(best_w, sp[0]):.3g}"
+        NUM[f"COH{tag}WarmFar"] = f"{med(best_w, sp[-1]):.3g}"
+        NUM[f"COH{tag}HybNear"] = f"{med(hyb, sp[0]):.3g}"
+        NUM[f"COH{tag}HybFar"] = f"{med(hyb, sp[-1]):.3g}"
+        cross = [s for s in sp if med(hyb, s) < min(med(m, s) for m, _ in COH_ROWS[prob]
+                                                     if m not in (hyb, "pinn_nk2", "pinn_newton1", "psp", "psp_s4"))]
+        NUM[f"COH{tag}Cross"] = f"{cross[0]}" if cross else "none"
+        NUM[f"COH{tag}CrossDt"] = tx(cross[0] / (out["n_t"] - 1)) if cross else "---"
+        NUM[f"COH{tag}RatioFar"] = f"{med(best_w, sp[-1]) / med(hyb, sp[-1]):.1f}"
+        psp = "psp_s4" if prob == "heat" else "psp"
+        fixed = "pinn_nk2" if prob == "heat" else "pinn_newton1"
+        NUM[f"COH{tag}Psp"] = f"{med(psp, sp[-1]):.3g}"
+        NUM[f"COH{tag}Fixed"] = f"{med(fixed, sp[-1]):.3g}"
+        NUM[f"COH{tag}FixedErr"] = tx(max(np.nanmax(R[(fixed, s)]["e_max"]) for s in sp))
+        fc = [s for s in sp if med(fixed, s) < med(best_w, s)]
+        NUM[f"COH{tag}FixedCrossDt"] = tx(fc[0] / (out["n_t"] - 1)) if fc else "---"
+        NUM[f"COH{tag}PspErr"] = tx(max(np.nanmax(R[(psp, s)]["e_max"]) for s in sp))
+    body("TabCoherence", lines)
+
+
+def legendre():
+    """E14: Legendre basis (uniform inputs) and multi-element PC."""
+    chk = load("e14_checks.pkl")
+    if chk is not None:
+        NUM["LEGlminLeg"] = f"{chk['lmin_legendre'][-1]:.3f}"
+        NUM["LEGlminHer"] = f"{chk['lmin_hermite'][-1]:.2f}"
+        NUM["LEGumin"] = f"{chk['umin_legendre']:.3f}"
+        NUM["LEGpfourLegTwo"] = tx(chk["p4_legendre"]["mf"][0])
+        NUM["LEGpfourLegTwelve"] = tx(chk["p4_legendre"]["mf"][-1])
+        NUM["LEGpfourHerTwelve"] = tx(chk["p4_hermite"]["mf"][-1])
+    p = os.path.join(RES, "e14_train.json")
+    h = os.path.join(RES, "e1_exp_d2p4.json")
+    if os.path.exists(p) and os.path.exists(h):
+        L, H = json.load(open(p)), json.load(open(h))
+        rows = [("pinn", "neural closure"), ("taylor4", "Taylor-4"), ("taylor8", "Taylor-8"), ("lanczos8", "Lanczos-8"),
+                ("lanczos10", "Lanczos-10"), ("psp_vs_galerkin", "PSP ($q=p+1$) vs.\\ $\\cG_f$")]
+        lines = []
+        for k, lab in rows:
+            cells = []
+            for r in (H, L):
+                cells += [e(np.median(r[k])), e(np.percentile(r[k], 95))] if k in r else ["---", "---"]
+            lines.append(f"{lab} & " + " & ".join(cells) + "\\\\")
+        body("TabLegendre", lines)
+        NUM["LEGpinnMed"] = tx(float(np.median(L["pinn"])))
+        NUM["LEGpinnMedHer"] = tx(float(np.median(H["pinn"])))
+        NUM["LEGtaylorMed"] = tx(float(np.median(L["taylor4"])))
+        NUM["LEGlanczosMed"] = tx(float(np.median(L["lanczos10"])))
+        NUM["LEGttrain"] = f"{L['t_train'] / 60:.0f}"
+    out = load("e14_ignition.pkl")
+    if out is not None:
+        R = out["runs"]
+        nes = sorted({k[0] for k in R})
+        labs = dict(eig="Galerkin-eig", psp="tensor PSP ($q=p+1$)", taylor4="Taylor-4", lanczos="Lanczos ($m=10$)",
+                    pinn="neural closure")
+        lines = []
+        for m, lab in labs.items():
+            cells = []
+            for ne in nes:
+                r = R.get((ne, m), {})
+                cells += [e(r["l2_err"][-1].max()) if r.get("ok") else "fails", wall(r["wall"]) if r.get("ok") else "---"]
+            lines.append(f"{lab} & " + " & ".join(cells) + "\\\\")
+        lines.append("\\midrule")
+        inp = [R[(ne, "inputs")] for ne in nes]
+        lines.append("input spectral radius (median / max) & " + " & ".join(
+            f"\\multicolumn{{2}}{{c}}{{{r['rho_med']:.2f} / {r['rho_max']:.2f}}}" for r in inp) + "\\\\")
+        for k, lab in [("pinn", "closure error, neural (median / max)"), ("taylor4", "closure error, Taylor-4 (median / max)")]:
+            lines.append(f"{lab} & " + " & ".join(
+                f"\\multicolumn{{2}}{{c}}{{{e(np.median(r[f'cerr_{k}']))} / {e(r[f'cerr_{k}'].max())}}}" for r in inp)
+                + "\\\\")
+        body("TabLegIgn", lines)
+        g = lambda ne, m: R[(ne, m)]["l2_err"][-1].max()
+        NUM["LEGignEig"] = tx(g(1, "eig"))
+        NUM["LEGignPinn"] = tx(g(1, "pinn"))
+        NUM["LEGignPinnFour"] = tx(g(nes[-1], "pinn"))
+        NUM["LEGignEigFour"] = tx(g(nes[-1], "eig"))
+        NUM["LEGignTaylor"] = tx(g(1, "taylor4"))
+        NUM["LEGignTaylorFour"] = tx(g(nes[-1], "taylor4"))
+        NUM["LEGrhoGlob"] = f"{inp[0]['rho_max']:.2f}"
+        NUM["LEGrhoFour"] = f"{inp[-1]['rho_max']:.2f}"
+        NUM["LEGcerrPinnGlob"] = tx(float(np.median(inp[0]["cerr_pinn"])))
+        NUM["LEGcerrPinnFour"] = tx(float(np.median(inp[-1]["cerr_pinn"])))
+        NUM["LEGcerrTayGlob"] = tx(float(np.median(inp[0]["cerr_taylor4"])))
+        NUM["LEGcerrTayFour"] = tx(float(np.median(inp[-1]["cerr_taylor4"])))
+
+
+SCAL_ROWS = {
+    "heat": [("chord_w8", "chord, warm"), ("chord_w8_as", "chord, warm, active set"), ("nk_w8", "NK, warm"),
+             ("newton_w8", "Newton, warm"), ("psp_s3", "sparse PSP ($k=3$)"), ("psp_s4", "sparse PSP ($k=4$)"),
+             ("pinn", "network"), ("pinn_nk2", "network + 2 NK (fixed)")],
+    "ign": [("eig", "Galerkin-eig"), ("lanczos", "Lanczos ($m=10$)"), ("taylor4", "Taylor-4"),
+            ("psp_s3", "sparse PSP ($k=3$)"), ("psp_s4", "sparse PSP ($k=4$)"), ("pinn", "neural closure")],
+}
+
+
+def scaling():
+    """E12: cost per node and call on large meshes, one CPU thread, 20 processes and a GPU (results/e12_scaling.json)."""
+    p = os.path.join(RES, "e12_scaling.json")
+    if not os.path.exists(p):
+        return
+    recs = json.load(open(p))["records"]
+    idx = {(r["problem"], r["method"], r["N"], r["device"], r["window"]): r for r in recs}
+    # the headline window: whole trajectory on the stored meshes (N <= 60), last calls above (first calls: zero states)
+    rec = lambda pr, m, N, dev: idx.get((pr, m, N, dev, "first" if N <= 60 else "late"))
+    us = lambda pr, m, N, dev: rec(pr, m, N, dev)["t_node_call_us"] if rec(pr, m, N, dev) else None
+    sizes, devs, big = [1000, 16000], ["cpu1", "cpuall", "gpu"], [1000, 4000, 16000]
+    lines = []
+    for pr, title in [("heat", "heat conduction"), ("ign", "ignition")]:
+        lines.append(f"\\multicolumn{{8}}{{l}}{{\\emph{{{title}}}}}\\\\")
+        for m, lab in SCAL_ROWS[pr]:
+            cells = []
+            for N in sizes:
+                for dev in devs:
+                    r = rec(pr, m, N, dev)
+                    if r is None:
+                        cells.append("---")
+                        continue
+                    t = r["t_node_call_us"]
+                    cells.append((f"{t:.0f}" if t >= 10 else f"{t:.1f}") + ("$^\\ast$" if r["truncated"] else ""))
+            r = rec(pr, m, sizes[-1], "cpu1") or rec(pr, m, sizes[-1], "gpu")
+            err = "reference" if m == "eig" else f"{e(r['err_median'])} / {e(r['err_max'])}"
+            lines.append(f"{lab} & " + " & ".join(cells) + f" & {err}\\\\")
+    body("TabScaling", lines)
+    # GPU against one thread on the large meshes
+    sp = lambda pr, m: [us(pr, m, N, "cpu1") / us(pr, m, N, "gpu") for N in big]
+    fast = sum([sp("heat", m) for m in ("chord_w8", "nk_w8", "pinn_nk2")]
+               + [sp("ign", m) for m in ("lanczos", "taylor4", "pinn")], [])
+    psp = sum([sp(pr, m) for pr in ("heat", "ign") for m in ("psp_s3", "psp_s4")], [])
+    NUM["SCALgpuLo"], NUM["SCALgpuHi"] = f"{min(fast):.0f}", f"{max(fast):.0f}"
+    NUM["SCALgpuPspLo"], NUM["SCALgpuPspHi"] = f"{min(psp):.0f}", f"{max(psp):.0f}"
+    rg = lambda a: f"{min(a):.0f}" if f"{min(a):.0f}" == f"{max(a):.0f}" else f"{min(a):.0f}--{max(a):.0f}"
+    NUM["SCALgpuHeatNet"], NUM["SCALgpuNewton"] = rg(sp("heat", "pinn")), rg(sp("heat", "newton_w8"))
+    NUM["SCALgpuEig"] = f"{np.mean([1 / x for x in sp('ign', 'eig')]):.0f}"
+    # warm chord against the network with two NK corrections: every size, both windows, every device
+    rat = [idx[("heat", "pinn_nk2", N, dev, w)]["t_node_call_us"] / idx[("heat", "chord_w8", N, dev, w)]["t_node_call_us"]
+           for N in [15, 60, 250, 1000, 4000, 16000] for dev in devs for w in ("first", "late")
+           if ("heat", "pinn_nk2", N, dev, w) in idx and ("heat", "chord_w8", N, dev, w) in idx]
+    NUM["SCALchordLo"], NUM["SCALchordHi"] = f"{min(rat):.1f}", f"{max(rat):.1f}"
+    NUM["SCALchordGpu"] = f"{us('heat', 'chord_w8', 16000, 'gpu'):.0f}"
+    NUM["SCALhybGpu"] = f"{us('heat', 'pinn_nk2', 16000, 'gpu'):.0f}"
+    # on the GPU warm chord costs as much as sparse PSP (k = 4); on one thread PSP is cheaper
+    cg = [us("heat", "chord_w8", N, "gpu") / us("heat", "psp_s4", N, "gpu") for N in big]
+    cc = [us("heat", "chord_w8", N, "cpu1") / us("heat", "psp_s4", N, "cpu1") for N in big]
+    NUM["SCALchordPspGpuLo"], NUM["SCALchordPspGpuHi"] = f"{min(cg):.2f}", f"{max(cg):.2f}"
+    NUM["SCALchordPspCpu"] = f"{np.mean(cc):.1f}"
+    # ignition network against Taylor-4 (all sizes and devices but the GPU below 250 nodes) and sparse PSP (k = p + 1)
+    Ns = [31, 60, 250, 1000, 4000, 16000]
+    tay = [us("ign", "taylor4", N, d) / us("ign", "pinn", N, d) for N in Ns for d in devs
+           if us("ign", "pinn", N, d) and not (d == "gpu" and N < 250)]
+    NUM["SCALtayLo"], NUM["SCALtayHi"] = f"{min(tay):.1f}", f"{max(tay):.1f}"
+    lan = [us("ign", "lanczos", N, d) / us("ign", "pinn", N, d) for N in Ns for d in devs if us("ign", "pinn", N, d)]
+    NUM["SCALlanLo"], NUM["SCALlanHi"] = f"{min(lan):.1f}", f"{max(lan):.1f}"
+    NUM["SCALtayGpuSmall"] = f"{max(us('ign', 'pinn', N, 'gpu') / us('ign', 'taylor4', N, 'gpu') for N in (31, 60)):.1f}"
+    pg = [us("ign", "psp_s4", N, "gpu") / us("ign", "pinn", N, "gpu") for N in [250] + big]
+    pc = [us("ign", "pinn", N, "cpu1") / us("ign", "psp_s4", N, "cpu1") for N in [60, 250] + big]
+    NUM["SCALnetPspGpuLo"], NUM["SCALnetPspGpuHi"] = f"{min(pg):.1f}", f"{max(pg):.1f}"
+    NUM["SCALnetPspCpu"] = f"{np.mean(pc):.1f}"
+    NUM["SCALnetGpu"] = f"{us('ign', 'pinn', 16000, 'gpu'):.1f}"
+    NUM["SCALpspFourGpu"] = f"{us('ign', 'psp_s4', 16000, 'gpu'):.1f}"
+    NUM["SCALpspThreeGpu"] = f"{us('ign', 'psp_s3', 16000, 'gpu'):.1f}"
+    # the cost per node and call no longer depends on the mesh: largest change between 1000 and 16000 nodes (one thread
+    # and GPU; with 20 processes it grows by up to SCALnodeDevAll %)
+    ch = [us(pr, m, 16000, d) / us(pr, m, 1000, d) for pr in ("heat", "ign") for m, _ in SCAL_ROWS[pr] for d in ("cpu1", "gpu")
+          if us(pr, m, 16000, d) and us(pr, m, 1000, d) and not rec(pr, m, 16000, d)["truncated"]
+          and not rec(pr, m, 1000, d)["truncated"]]
+    NUM["SCALnodeDev"] = f"{100 * max(abs(np.array(ch) - 1)):.0f}"
+    ca = [us(pr, m, 16000, "cpuall") / us(pr, m, 1000, "cpuall") for pr in ("heat", "ign") for m, _ in SCAL_ROWS[pr]
+          if us(pr, m, 16000, "cpuall") and not rec(pr, m, 16000, "cpuall")["truncated"]
+          and not rec(pr, m, 1000, "cpuall")["truncated"]]
+    NUM["SCALnodeDevAll"] = f"{100 * (max(ca) - 1):.0f}"
+    # batched solvers iterate until the slowest node has converged: slowest node (batched run) against the mean node
+    # (active-set run, whose nodes stop when converged), last calls at N = 16000 on the GPU
+    for m, key in (("chord_w8", "Chord"), ("nk_w8", "NK")):
+        NUM[f"SCALit{key}Max"] = f"{idx[('heat', m, 16000, 'gpu', 'late')]['iters_max_mean']:.1f}"
+        NUM[f"SCALit{key}Mean"] = f"{idx[('heat', m + '_as', 16000, 'gpu', 'late')]['iters_node_mean']:.2f}".rstrip("0")
+    # median errors at N = 16000 (the same on every mesh from 250 nodes on)
+    for pr, m, key in (("heat", "chord_w8", "Chord"), ("heat", "pinn_nk2", "Hyb"), ("heat", "pinn", "Net"),
+                       ("ign", "lanczos", "Lan"), ("ign", "taylor4", "Tay"), ("ign", "pinn", "IgnNet")):
+        NUM[f"SCALerr{key}"] = tx(rec(pr, m, 16000, "cpu1")["err_median"])
+    # 20 node-parallel processes against one thread from 1000 nodes on
+    pa = [us(pr, m, N, "cpu1") / us(pr, m, N, "cpuall") for pr in ("heat", "ign") for m, _ in SCAL_ROWS[pr] for N in big
+          if us(pr, m, N, "cpu1") and us(pr, m, N, "cpuall")]
+    NUM["SCALallLo"], NUM["SCALallHi"] = f"{min(pa):.0f}", f"{max(pa):.0f}"
+    # speed-up of the GPU over 20 processes (N = 16000) for the closures sped up most by the GPU
+    sa = [us(pr, m, 16000, "cpuall") / us(pr, m, 16000, "gpu") for pr, m in
+          (("heat", "chord_w8"), ("heat", "nk_w8"), ("heat", "pinn_nk2"), ("ign", "lanczos"), ("ign", "taylor4"),
+                   ("ign", "pinn"))]
+    NUM["SCALgpuAllLo"], NUM["SCALgpuAllHi"] = f"{min(sa):.0f}", f"{max(sa):.0f}"
+    env = json.load(open(p))["env"]
+    NUM["SCALfpRatio"] = f"{env['gpu_sgemm_gflops'] / env['gpu_dgemm_gflops']:.0f}"
+    NUM["SCALgpuDp"] = f"{env['gpu_dgemm_gflops']:.0f}"
+    NUM["SCALcpuOne"] = f"{env['cpu_dgemm_gflops_1thread']:.0f}"
+    NUM["SCALcpuAll"] = f"{env['cpu_dgemm_gflops_allthreads']:.0f}"
+
+
 def numbers_file():
     # every macro used in the manuscript but not computed (missing result file) becomes a visible placeholder
     import re
     used = set()
     for root in (os.path.join(ROOT, "paper"), os.path.join(ROOT, "paper", "sections"),
-                 os.path.join(ROOT, "paper", "sections_pem")):
+                 os.path.join(ROOT, "paper", "sections_pem"), os.path.join(ROOT, "paper", "sections_pem_standalone")):
         for f in os.listdir(root):
             if f.endswith(".tex"):
-                used |= set(re.findall(r"\\((?:IGN|ENT|OSC|PEN|TOG|SEED|OOD|GH|TOL|BENCH|PCONV|CAP|PAR|ENH)[A-Za-z]*)",
+                used |= set(re.findall(r"\\((?:IGN|ENT|OSC|PEN|TOG|SEED|OOD|GH|TOL|BENCH|PCONV|CAP|PAR|ENH|COH|LEG|SCAL)[A-Za-z]*)",
                                        open(os.path.join(root, f), encoding="utf8").read()))
     for k in sorted(used - set(NUM)):
         NUM[k] = r"\textbf{??}"
         print("MISSING", k)
-    for k in ("TabClosures", "TabPendulum", "TabToggle", "TabIgnition", "TabEnthalpy", "TabImplicit", "TabChecks",
-              "TabGH", "TabSqrt", "TabOODexp", "TabCapacity", "TabParallel", "TabSweep", "TabEnhanced"):
+    for k in ("TabClosures", "TabPendulum", "TabPendulumClosures", "TabToggle", "TabIgnition", "TabEnthalpy", "TabImplicit", "TabChecks",
+              "TabGH", "TabSqrt", "TabOODexp", "TabCapacity", "TabParallel", "TabSweep", "TabEnhanced",
+              "TabCoherence", "TabLegendre", "TabLegIgn", "TabScaling"):
         BODIES.setdefault(k, r"\multicolumn{2}{l}{\textbf{??}}\\")
     lines = [f"\\newcommand{{\\{k}}}{{{v}}}" for k, v in NUM.items()]
     for k, v in BODIES.items():
@@ -741,7 +977,7 @@ def numbers_file():
 
 if __name__ == "__main__":
     for f in (closures, pendulum, toggle, ignition, enthalpy, implicit, seeds, checks, bench, supplement_tables,
-              capacity, parallel, enhanced):
+              capacity, parallel, enhanced, coherence, legendre, scaling):
         try:
             f()
         except Exception as ex:                       # keep going: tables are independent
